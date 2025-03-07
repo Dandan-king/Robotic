@@ -43,22 +43,35 @@ class RobotGUI:
                                    font=('Arial', 12))
         self.coord_label.pack(pady=10)
 
-        # Control buttons (仅保留 Exit 按钮)
+        # Control buttons
         self.btn_frame = ttk.Frame(master)
         self.btn_frame.pack(pady=10)
         
+        self.grab_btn = ttk.Button(self.btn_frame, text="Grab", command=self.grab_object, state=tk.DISABLED)
+        self.grab_btn.pack(side=tk.LEFT, padx=5)
+        
         self.exit_btn = ttk.Button(self.btn_frame, text="Exit", command=self.quit_program)
         self.exit_btn.pack(side=tk.LEFT, padx=5)
+
+        # 状态变量
+        self.selected_object = None
 
     def on_select(self, event):
         try:
             selection = self.object_list.curselection()
             if selection:
                 obj_index = selection[0]
-                selected_coord = self.object_list.get(obj_index).split(": ")[1]
+                self.selected_object = self.object_list.get(obj_index)
+                selected_coord = self.selected_object.split(": ")[1]
                 self.coord_label.config(text=f"Arm Coordinates: {selected_coord}")
+                self.grab_btn.config(state=tk.NORMAL)  # 启用 Grab 按钮
         except Exception as e:
             print(f"Selection error: {str(e)}")
+
+    def grab_object(self):
+        if self.selected_object:
+            self.controller.grab_selected_object(self.selected_object)
+            self.grab_btn.config(state=tk.DISABLED)  # 抓取后禁用 Grab 按钮
 
     def quit_program(self):
         self.controller.cleanup()
@@ -138,7 +151,6 @@ class DetectionThread(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
-
 # ==========================================
 # Main Controller
 # ==========================================
@@ -176,6 +188,34 @@ class MainController:
     def start_detection(self):
         print("Starting detection...")
         self.detect_thread.start()
+
+    def grab_selected_object(self, selected_object):
+        """执行抓取操作"""
+        try:
+            # 解析选中物体的坐标
+            coord_str = selected_object.split(": ")[1]
+            coord_values = coord_str.split(", ")
+            x = float(coord_values[0].split(":")[1])
+            y = float(coord_values[1].split(":")[1])
+            z = float(coord_values[2].split(":")[1])
+            
+            target_position = [x, y, z]
+            
+            # 移动机械臂
+            print(f"Moving to position: {target_position}")
+            self.ur5.move_to(target_position)
+            
+            # 执行抓取
+            print("Grasping object...")
+            self.hand.grasp()
+            time.sleep(2)  # 等待抓取完成
+            
+            # 释放机械手
+            print("Releasing hand...")
+            self.hand.release()
+            
+        except Exception as e:
+            print(f"Grasping failed: {str(e)}")
 
     def update_gui(self):
         try:
