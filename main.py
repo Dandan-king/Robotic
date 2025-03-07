@@ -1,460 +1,276 @@
-"""
-主控制程序
-
-功能：
-- 初始化摄像头、YOLO模型、UR5机械臂和灵巧手
-- 管理共享数据和线程控制
-- 启动GUI并初始化所有线程
-- 处理物体检测结果和跟踪逻辑
-- 控制机械臂和灵巧手的动作
-- 清理资源
-
-类：
-- PositionFilter: 用于平滑物体位置
-- MainController: 主控制类，包含主要功能和线程管理
-
-使用示例：
->>> controller = MainController()
->>> controller.start_gui()
-"""
-
 import cv2
 import time
 import threading
+import queue
 import numpy as np
-from tkinter import Tk
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
 from config import MODEL_PATH, UR5_IP, UR5_PORT, HAND_IP, HAND_PORT, HAND_SPEED, HAND_FORCE
 from model import initialize_model
-from camera import Camera
+from camera import Camera  # 使用新的Camera类
 from ur5 import UR5Controller
 from inspire_hand import InspireHand
 from utils import transform_to_arm_coordinates
-from gui import ControlGUI
 
-class PositionFilter:
-    """
-    用于平滑物体位置的类
-    """
-    def __init__(self, window_size=5):
-        self.window_size = window_size
-        self.position_history = []
+# ==========================================
+# GUI 界面类
+# ==========================================
+class RobotGUI:
+    def __init__(self, master, controller):
+        self.master = master
+        self.controller = controller
+        master.title("Robot Control")
+        master.geometry("920x780")
+
+        # Video display
+        self.video_frame = ttk.LabelFrame(master, text="Live Feed")
+        self.video_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
         
-    def update(self, new_position):
-        """
-        更新位置并返回平滑后的位置
+        self.canvas = tk.Canvas(self.video_frame, width=640, height=480)
+        self.canvas.pack()
+
+        # Object list
+        self.list_frame = ttk.LabelFrame(master, text="Detected Objects")
+        self.list_frame.pack(pady=10, fill=tk.X)
         
-        :param new_position: 新的位置
-        :return: 平滑后的位置
-        """
-        if len(self.position_history) > 0:
-            velocity = (new_position - self.position_history[-1]) * 0.2
-            new_position += velocity
-            
-        self.position_history.append(new_position.copy())
-        if len(self.position_history) > self.window_size:
-            self.position_history.pop(0)
-        return np.mean(self.position_history, axis=0)
+        self.object_list = tk.Listbox(self.list_frame, height=8)
+        self.object_list.pack(fill=tk.BOTH, expand=True)
+        self.object_list.bind('<<ListboxSelect>>', self.on_select)
 
-class MainController:
-    """
-    主控制类，包含主要功能和线程管理
-    """
-    def __init__(self):
-        self.initialize_camera()
-        self.initialize_model()
-        self.initialize_ur5()
-        self.initialize_hand()
-        self.initialize_shared_data()
-        self.initialize_threads()
+        # Arm coordinates display
+        self.coord_label = ttk.Label(master, text="Arm Coordinates: Not selected", 
+                                   font=('Arial', 12))
+        self.coord_label.pack(pady=10)
 
-    def initialize_camera(self):
-        """初始化摄像头"""
+        # Control buttons
+        self.btn_frame = ttk.Frame(master)
+        self.btn_frame.pack(pady=10)
+        
+        self.start_btn = ttk.Button(self.btn_frame, text="Start", command=self.start_detection)
+        self.start_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.exit_btn = ttk.Button(self.btn_frame, text="Exit", command=self.quit_program)
+        self.exit_btn.pack(side=tk.LEFT, padx=5)
+
+    def on_select(self, event):
         try:
-            self.camera = Camera()
-            print("摄像头初始化成功")
+            selection = self.object_list.curselection()
+            if selection:
+                obj_index = selection[0]
+                selected_coord = self.object_list.get(obj_index).split(": ")[1]
+                self.coord_label.config(text=f"Arm Coordinates: {selected_coord}")
         except Exception as e:
-            print(f"摄像头初始化失败: {str(e)}")
-            self.camera = None
+            print(f"Selection error: {str(e)}")
 
-    def initialize_model(self):
-        """初始化YOLO模型"""
-        try:
-            self.model = initialize_model(MODEL_PATH)
-            print("YOLO模型加载成功")
-        except Exception as e:
-            print(f"YOLO模型加载失败: {str(e)}")
-            self.model = None
+    def start_detection(self):
+        self.start_btn.config(state=tk.DISABLED)
+        self.controller.start_detection()
 
-    def initialize_ur5(self):
-        """初始化机械臂"""
-        try:
-            self.ur5_controller = UR5Controller(UR5_IP, UR5_PORT)
-            self.ur5_controller.connect()
-            print("机械臂连接成功")
-        except Exception as e:
-            print(f"机械臂连接失败: {str(e)}")
-            self.ur5_controller = None
+    def quit_program(self):
+        self.controller.cleanup()
+        self.master.quit()
+        self.master.destroy()
 
-    def initialize_hand(self):
-        """初始化机械手"""
-        try:
-            self.hand_client = InspireHand(HAND_IP, HAND_PORT, HAND_SPEED, HAND_FORCE)
-            self.hand_client.connect()
-            print("机械手连接成功")
-        except Exception as e:
-            print(f"机械手连接失败: {str(e)}")
-            self.hand_client = None
+    def update_interface(self, frame, objects):
+        # Update video feed
+        img = Image.fromarray(frame)
+        self.photo = ImageTk.PhotoImage(image=img)
+        self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
+        
+        # Update object list
+        self.object_list.delete(0, tk.END)
+        for obj in objects:
+            coord_str = f"{obj['name']}: X:{obj['position'][0]:.2f}, Y:{obj['position'][1]:.2f}, Z:{obj['position'][2]:.2f}"
+            self.object_list.insert(tk.END, coord_str)
 
-    def initialize_shared_data(self):
-        """初始化共享数据"""
-        self.detected_objects = []
-        self.current_frame = None
-        self.selected_object = None
-        self.frame_lock = threading.Lock()
-        self.object_list_lock = threading.Lock()
-        self.last_object_ids = set()
-        self.gui_update_interval = 0.5
-        self.last_gui_update = 0
-        self.frozen_object_list = []
-        self.stop_event = threading.Event()
-        self.gui_ready_event = threading.Event()
-        self.gui = None
-        self.tracked_objects = {}
-        self.next_track_id = 0
-        self.stability_threshold = 5
-        self.position_filters = {}
-        self.max_lost_frames = 3
-        self.min_valid_samples_ratio = 0.3
-        self.depth_valid_range = (300, 2000)
 
-    def initialize_threads(self):
-        """初始化线程"""
-        threading.Thread(target=self.detection_thread, daemon=True).start()
-        threading.Thread(target=self.control_thread, daemon=True).start()
-        threading.Thread(target=self.gui_update_thread, daemon=True).start()
+# ==========================================
+# 线程类定义
+# ==========================================
+class GUIUpdateThread(threading.Thread):
+    def __init__(self, gui, data_queue):
+        super().__init__()
+        self.gui = gui
+        self.data_queue = data_queue
+        self._stop_event = threading.Event()
 
-    def start_gui(self):
-        """启动 GUI 界面并初始化所有线程"""
-        if not self.camera or not self.model or not self.ur5_controller or not self.hand_client:
-            print("初始化失败，无法启动GUI")
-            return
-
-        root = Tk()
-        self.gui = ControlGUI(root)
-        self.gui.object_list.bind('<<ListboxSelect>>', self.on_object_select)
-        root.protocol("WM_DELETE_WINDOW", self.cleanup)
-        self.gui_ready_event.set()
-        root.mainloop()
-
-    def on_object_select(self, event):
-        """当用户选择列表项时冻结当前列表"""
-        with self.object_list_lock:
-            self.frozen_object_list = [obj.copy() for obj in self.detected_objects]
-
-    def gui_update_thread(self):
-        """GUI 更新线程"""
-        while not self.stop_event.is_set():
+    def run(self):
+        while not self._stop_event.is_set():
             try:
-                self.update_gui()
+                # 从队列获取最新数据
+                data = self.data_queue.get_nowait()
+                
+                # 在主线程执行GUI更新
+                self.gui.master.after(0, self._update_gui, data)
+                
+            except queue.Empty:
                 time.sleep(0.05)
             except Exception as e:
                 print(f"GUI更新错误: {str(e)}")
 
-    def update_gui(self):
-        """更新GUI界面"""
-        now = time.time()
-        if now - self.last_gui_update < self.gui_update_interval:
-            time.sleep(0.1)
-            return
+    def _update_gui(self, data):
+        """实际执行GUI更新的方法"""
+        if 'frame' in data:
+            self.gui.update_video(data['frame'])
+        if 'objects' in data:
+            self.gui.update_object_list(data['objects'])
+        if 'coordinates' in data:
+            self.gui.update_coordinates(*data['coordinates'])
 
-        if self.current_frame is not None:
-            frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
-            self.gui.update_video(frame)
+    def stop(self):
+        self._stop_event.set()
 
-        with self.object_list_lock:
-            display_objects = self.frozen_object_list if self.frozen_object_list else self.detected_objects
-            stable_objects, current_ids = self.get_stable_objects(display_objects)
-            preserved_ids = current_ids & self.last_object_ids
-            self.last_object_ids = current_ids
 
-        self.gui.update_object_list([
-            {
-                "id": obj["id"],
-                "name": obj["name"],
-                "position": obj["position_str"]
-            }
-            for obj in stable_objects if obj["id"] in preserved_ids
-        ])
+# ==========================================
+# 检测线程修改（显示三维坐标）
+# ==========================================
+class DetectionThread(threading.Thread):
+    def __init__(self, controller, update_queue):
+        super().__init__()
+        self.controller = controller
+        self.update_queue = update_queue
+        self._stop_event = threading.Event()
 
-        if self.selected_object is not None:
-            cam_str, arm_str = self.get_coordinates_str(self.selected_object)
-            self.gui.update_coordinates(cam_str, arm_str)
-
-        self.last_gui_update = now
-
-    def get_stable_objects(self, display_objects):
-        """获取稳定的物体列表"""
-        stable_objects = []
-        current_ids = set()
-        for obj in display_objects:
-            arm_pos = obj.get("arm_position")
-            if isinstance(arm_pos, (list, np.ndarray)) and len(arm_pos) == 3:
-                pos_str = f"({arm_pos[0]:.1f}, {arm_pos[1]:.1f}, {arm_pos[2]:.1f})"
-            else:
-                pos_str = "(Invalid Position)"
-                arm_pos = [0, 0, 0]
-
-            obj_id = f"{obj['name']}-{hash(tuple(arm_pos))[:6]}"
-            current_ids.add(obj_id)
-            stable_objects.append({
-                "id": obj_id,
-                "name": obj["name"],
-                "position_str": pos_str,
-                "raw_position": arm_pos
-            })
-        return stable_objects, current_ids
-
-    def get_coordinates_str(self, selected_object):
-        """获取坐标字符串"""
-        cam_coord = selected_object.get("position", [0, 0, 0])
-        arm_coord = selected_object.get("arm_position", [0, 0, 0])
-
-        if not (isinstance(cam_coord, (list, np.ndarray)) and len(cam_coord) == 3):
-            cam_coord = [0, 0, 0]
-        cam_str = f"Camera: ({cam_coord[0]:.1f}, {cam_coord[1]:.1f}, {cam_coord[2]:.1f})"
-
-        if isinstance(arm_coord, np.ndarray):
-            arm_coord = arm_coord.tolist()
-        if not (isinstance(arm_coord, list) and len(arm_coord) == 3):
-            arm_coord = [0, 0, 0]
-        arm_str = f"Arm: ({arm_coord[0]:.1f}, {arm_coord[1]:.1f}, {arm_coord[2]:.1f})"
-
-        return cam_str, arm_str
-
-    def detection_thread(self):
-        """物体检测线程"""
-        self.gui_ready_event.wait()
-        self.hand_client.set_positions([1000] * 5 + [400])
-        
-        while not self.stop_event.is_set():
+    def run(self):
+        while not self._stop_event.is_set():
             try:
-                frames = self.camera.pipeline.wait_for_frames()
-                color_frame = frames.get_color_frame()
-                depth_frame = frames.get_depth_frame()
-                
+                color_frame, depth_frame = self.controller.camera.align_frames()
                 if not color_frame or not depth_frame:
                     continue
-                    
-                color_image = np.asanyarray(color_frame.get_data())
-                with self.frame_lock:
-                    self.current_frame = color_image.copy()
+
+                # Process detection
+                color_img = np.asanyarray(color_frame.get_data())
+                depth_img = np.asanyarray(depth_frame.get_data())
+                results = self.controller.model(color_img)
+                objects = self.process_detection(results, depth_img, color_frame)
                 
-                if self.gui.detection_running:
-                    depth_image = np.asanyarray(depth_frame.get_data())
-                    results = self.model(color_image)
-                    self.process_detection_results(results, depth_image, color_frame)
-                    
-            except Exception as e:
-                print(f"检测线程错误: {str(e)}")
-
-    def get_object_position(self, box, depth_frame, intrinsics, sampling_area_size=7):
-        """
-        获取物体位置并进行深度平滑和深度平均计算。
-        
-        :param box: YOLO 检测到的单个物体的边界框
-        :param depth_frame: 深度图像帧
-        :param intrinsics: 相机内参
-        :param sampling_area_size: 采样区域大小（例如5x5像素点）
-        :return: 物体在相机坐标系中的三维坐标
-        """
-        xyxy = box.xyxy[0].cpu().numpy()
-        center_x = (xyxy[0] + xyxy[2]) / 2
-        center_y = (xyxy[1] + xyxy[3]) / 2
-
-        depth_values = []
-        valid_samples = 0
-        for i in range(-sampling_area_size//2, sampling_area_size//2+1):
-            for j in range(-sampling_area_size//2, sampling_area_size//2+1):
-                x_sample = int(center_x + i)
-                y_sample = int(center_y + j)
-                if 0 <= x_sample < depth_frame.shape[1] and 0 <= y_sample < depth_frame.shape[0]:
-                    depth = depth_frame[y_sample, x_sample] / 1000.0
-                    if depth > 0:
-                        depth_values.append(depth)
-                        valid_samples += 1
-
-        if valid_samples < sampling_area_size**2 * 0.3:
-            return None
-        
-        smoothed_depth = np.median(depth_values)
-        x_cam = (center_x - intrinsics.ppx) * smoothed_depth / intrinsics.fx
-        y_cam = (center_y - intrinsics.ppy) * smoothed_depth / intrinsics.fy
-        z_cam = smoothed_depth
-
-        return np.array([x_cam, y_cam, z_cam])
-    
-    def process_detection_results(self, results, depth_frame, color_frame):
-        """处理物体检测结果并进行跟踪"""
-        intrinsics = self.camera.get_intrinsics(color_frame)
-        current_objects = []
-
-        for box in results[0].boxes:
-            class_id = int(box.cls[0].cpu().numpy())
-            name = self.model.names[class_id]
-            position = self.get_object_position(box, depth_frame, intrinsics)
-            
-            if position is not None:
-                current_objects.append({
-                    "name": name,
-                    "position": position,
-                    "arm_position": transform_to_arm_coordinates(position),
-                    "bbox": box.xyxy[0].cpu().numpy().tolist()
+                # Prepare update data
+                self.update_queue.put({
+                    'frame': cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB),
+                    'objects': objects
                 })
-
-        updated_tracks, used_track_ids = self.update_tracks(current_objects)
-        self.clean_lost_tracks(updated_tracks, used_track_ids)
-        self.apply_position_filter()
-        self.detected_objects = self.get_stable_objects_list()
-
-        print(f"[跟踪统计] 总跟踪数:{len(self.tracked_objects)} 稳定对象:{len(self.detected_objects)}")
-
-    def update_tracks(self, current_objects):
-        """更新跟踪对象"""
-        updated_tracks = {}
-        used_track_ids = set()
-
-        current_objects.sort(
-            key=lambda x: (x["bbox"][2]-x["bbox"][0])*(x["bbox"][3]-x["bbox"][1]),
-            reverse=True
-        )
-
-        for obj in current_objects:
-            best_match_id, best_iou = self.find_best_match(obj)
-
-            if best_match_id is not None:
-                updated_tracks[best_match_id] = {
-                    "obj": obj,
-                    "stable_count": self.tracked_objects[best_match_id]["stable_count"] + 1,
-                    "lost_count": 0
-                }
-                used_track_ids.add(best_match_id)
-            else:
-                updated_tracks[self.next_track_id] = {
-                    "obj": obj,
-                    "stable_count": 1,
-                    "lost_count": 0
-                }
-                self.next_track_id += 1
-
-        return updated_tracks, used_track_ids
-
-    def find_best_match(self, obj):
-        """寻找最佳匹配的历史跟踪"""
-        best_match_id = None
-        best_iou = 0.5
-
-        for track_id, track_info in self.tracked_objects.items():
-            if track_id in self.used_track_ids:
-                continue
                 
-            current_iou = self._calculate_iou(obj["bbox"], track_info["obj"]["bbox"])
-            if current_iou > best_iou:
-                best_iou = current_iou
-                best_match_id = track_id
-
-        return best_match_id, best_iou
-
-    def clean_lost_tracks(self, updated_tracks, used_track_ids):
-        """清理丢失的跟踪对象"""
-        for track_id, track_info in self.tracked_objects.items():
-            if track_id not in used_track_ids:
-                updated_tracks[track_id] = {
-                    "obj": track_info["obj"],
-                    "stable_count": track_info["stable_count"],
-                    "lost_count": track_info["lost_count"] + 1
-                }
-
-        self.tracked_objects = {
-            track_id: info 
-            for track_id, info in updated_tracks.items()
-            if info["lost_count"] <= 5
-        }
-
-    def apply_position_filter(self):
-        """应用位置滤波"""
-        for track_id, track_info in self.tracked_objects.items():
-            if track_id not in self.position_filters:
-                self.position_filters[track_id] = PositionFilter()
-                
-            if track_info["lost_count"] == 0:
-                filtered_pos = self.position_filters[track_id].update(
-                    np.array(track_info["obj"]["position"])
-                )
-                track_info["obj"]["position"] = filtered_pos.tolist()
-
-    def get_stable_objects_list(self):
-        """获取稳定对象列表"""
-        return [
-            track_info["obj"]
-            for track_info in self.tracked_objects.values()
-            if track_info["stable_count"] >= self.stability_threshold
-        ]
-
-    def _calculate_iou(self, box1, box2):
-        """计算两个边界框的IOU"""
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-        
-        inter_area = max(0, x2 - x1) * max(0, y2 - y1)
-        area1 = (box1[2]-box1[0])*(box1[3]-box1[1])
-        area2 = (box2[2]-box2[0])*(box2[3]-box2[1])
-        return inter_area / (area1 + area2 - inter_area + 1e-6)
-
-    def control_thread(self):
-        """改进的控制线程"""
-        while not self.stop_event.is_set():
-            try:
-                if self.gui.current_selection is not None and self.frozen_object_list:
-                    selected_obj = self.frozen_object_list[self.gui.current_selection]
-                    self.selected_object = selected_obj
-                    
-                    self.ur5_controller.move_to(selected_obj["arm_position"])
-                    self.perform_grasping()
-                    
-                    self.gui.current_selection = None
-                    self.selected_object = None
-                    self.frozen_object_list = []
-                
-                time.sleep(0.1)
             except Exception as e:
-                print(f"控制线程错误: {str(e)}")
+                print(f"Detection error: {str(e)}")
 
-    def perform_grasping(self):
-        """执行抓取动作"""
+    def process_detection(self, results, depth_frame, color_frame):
+        objects = []
+        intrinsics = self.controller.camera.get_intrinsics()
+        
+        for box in results[0].boxes:
+            # Get center coordinates
+            xyxy = box.xyxy[0].cpu().numpy()
+            center_x = (xyxy[0] + xyxy[2]) / 2
+            center_y = (xyxy[1] + xyxy[3]) / 2
+            
+            # Calculate depth (meters)
+            depth = depth_frame[int(center_y), int(center_x)] / 1000.0
+            
+            # Convert to camera coordinates
+            x_cam = (center_x - intrinsics.ppx) * depth / intrinsics.fx
+            y_cam = (center_y - intrinsics.ppy) * depth / intrinsics.fy
+            
+            # Transform to arm coordinates
+            arm_coord = transform_to_arm_coordinates([x_cam, y_cam, depth])
+            
+            objects.append({
+                'name': self.controller.model.names[int(box.cls[0])],
+                'position': arm_coord
+            })
+        
+        return objects
+
+    def stop(self):
+        self._stop_event.set()
+class GraspingThread(threading.Thread):
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+        self._stop_event = threading.Event()
+        self.target_position = None
+        self.lock = threading.Lock()
+
+    def set_target(self, position):
+        with self.lock:
+            self.target_position = position
+
+    def run(self):
+        while not self._stop_event.is_set():
+            if self.target_position:
+                try:
+                    # 执行抓取动作
+                    self.controller.ur5.move_to(self.target_position)
+                    self.controller.hand.grasp()
+                    time.sleep(1)
+                    self.controller.hand.release()
+                    
+                    # 重置目标
+                    with self.lock:
+                        self.target_position = None
+                        
+                except Exception as e:
+                    print(f"抓取失败: {str(e)}")
+            time.sleep(0.1)
+
+    def stop(self):
+        self._stop_event.set()
+
+
+# ==========================================
+# 主控制器
+# ==========================================
+class MainController:
+    def __init__(self):
+        # Initialize hardware
+        self.camera = Camera()
+        self.model = initialize_model(MODEL_PATH)
+        self.ur5 = UR5Controller(UR5_IP, UR5_PORT)
+        self.hand = InspireHand(HAND_IP, HAND_PORT, HAND_SPEED, HAND_FORCE)
+        
+        # Connect devices
         try:
-            self.hand_client.grasp()
-            time.sleep(2)
-            self.hand_client.release()
+            self.ur5.connect()
+            self.hand.connect()
+            print("Devices connected")
         except Exception as e:
-            print(f"抓取动作失败: {str(e)}")
+            print(f"Connection failed: {str(e)}")
+            raise
+
+        # Initialize GUI
+        self.root = tk.Tk()
+        self.gui = RobotGUI(self.root, self)
+        
+        # Data communication
+        self.update_queue = queue.Queue(maxsize=3)
+        self.detect_thread = DetectionThread(self, self.update_queue)
+        
+        # Start GUI update loop
+        self.root.after(100, self.update_gui)
+
+    def start_detection(self):
+        print("Starting detection...")
+        self.detect_thread.start()
+
+    def update_gui(self):
+        try:
+            data = self.update_queue.get_nowait()
+            self.gui.update_interface(data['frame'], data['objects'])
+        except queue.Empty:
+            pass
+        self.root.after(100, self.update_gui)
 
     def cleanup(self):
-        """清理资源"""
-        self.stop_event.set()
-        if self.camera:
-            self.camera.stop()
-        if self.ur5_controller:
-            self.ur5_controller.disconnect()
-        if self.hand_client:
-            self.hand_client.disconnect()
-        if self.gui:
-            self.gui.master.destroy()
+        print("Cleaning up...")
+        self.detect_thread.stop()
+        self.camera.stop()
+        self.ur5.disconnect()
+        self.hand.disconnect()
+        self.root.destroy()
 
-def main():
-    controller = MainController()
-    controller.start_gui()
+    def run(self):
+        self.root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    controller = MainController()
+    controller.run()
