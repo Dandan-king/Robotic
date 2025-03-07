@@ -21,7 +21,7 @@ class RobotGUI:
         self.master = master
         self.controller = controller
         master.title("Robot Control")
-        master.geometry("920x780")
+        master.geometry("920x780")  # 窗口大小改为 920x780
 
         # Video display
         self.video_frame = ttk.LabelFrame(master, text="Live Feed")
@@ -43,12 +43,9 @@ class RobotGUI:
                                    font=('Arial', 12))
         self.coord_label.pack(pady=10)
 
-        # Control buttons
+        # Control buttons (仅保留 Exit 按钮)
         self.btn_frame = ttk.Frame(master)
         self.btn_frame.pack(pady=10)
-        
-        self.start_btn = ttk.Button(self.btn_frame, text="Start", command=self.start_detection)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
         
         self.exit_btn = ttk.Button(self.btn_frame, text="Exit", command=self.quit_program)
         self.exit_btn.pack(side=tk.LEFT, padx=5)
@@ -62,10 +59,6 @@ class RobotGUI:
                 self.coord_label.config(text=f"Arm Coordinates: {selected_coord}")
         except Exception as e:
             print(f"Selection error: {str(e)}")
-
-    def start_detection(self):
-        self.start_btn.config(state=tk.DISABLED)
-        self.controller.start_detection()
 
     def quit_program(self):
         self.controller.cleanup()
@@ -84,46 +77,8 @@ class RobotGUI:
             coord_str = f"{obj['name']}: X:{obj['position'][0]:.2f}, Y:{obj['position'][1]:.2f}, Z:{obj['position'][2]:.2f}"
             self.object_list.insert(tk.END, coord_str)
 
-
 # ==========================================
-# 线程类定义
-# ==========================================
-class GUIUpdateThread(threading.Thread):
-    def __init__(self, gui, data_queue):
-        super().__init__()
-        self.gui = gui
-        self.data_queue = data_queue
-        self._stop_event = threading.Event()
-
-    def run(self):
-        while not self._stop_event.is_set():
-            try:
-                # 从队列获取最新数据
-                data = self.data_queue.get_nowait()
-                
-                # 在主线程执行GUI更新
-                self.gui.master.after(0, self._update_gui, data)
-                
-            except queue.Empty:
-                time.sleep(0.05)
-            except Exception as e:
-                print(f"GUI更新错误: {str(e)}")
-
-    def _update_gui(self, data):
-        """实际执行GUI更新的方法"""
-        if 'frame' in data:
-            self.gui.update_video(data['frame'])
-        if 'objects' in data:
-            self.gui.update_object_list(data['objects'])
-        if 'coordinates' in data:
-            self.gui.update_coordinates(*data['coordinates'])
-
-    def stop(self):
-        self._stop_event.set()
-
-
-# ==========================================
-# 检测线程修改（显示三维坐标）
+# Detection Thread
 # ==========================================
 class DetectionThread(threading.Thread):
     def __init__(self, controller, update_queue):
@@ -183,6 +138,101 @@ class DetectionThread(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+
+# ==========================================
+# Main Controller
+# ==========================================
+class MainController:
+    def __init__(self):
+        # Initialize hardware
+        self.camera = Camera()
+        self.model = initialize_model(MODEL_PATH)
+        self.ur5 = UR5Controller(UR5_IP, UR5_PORT)
+        self.hand = InspireHand(HAND_IP, HAND_PORT, HAND_SPEED, HAND_FORCE)
+        
+        # Connect devices
+        try:
+            self.ur5.connect()
+            self.hand.connect()
+            print("Devices connected")
+        except Exception as e:
+            print(f"Connection failed: {str(e)}")
+            raise
+
+        # Initialize GUI
+        self.root = tk.Tk()
+        self.gui = RobotGUI(self.root, self)
+        
+        # Data communication
+        self.update_queue = queue.Queue(maxsize=3)
+        self.detect_thread = DetectionThread(self, self.update_queue)
+        
+        # Start detection immediately
+        self.start_detection()
+        
+        # Start GUI update loop
+        self.root.after(100, self.update_gui)
+
+    def start_detection(self):
+        print("Starting detection...")
+        self.detect_thread.start()
+
+    def update_gui(self):
+        try:
+            data = self.update_queue.get_nowait()
+            self.gui.update_interface(data['frame'], data['objects'])
+        except queue.Empty:
+            pass
+        self.root.after(100, self.update_gui)
+
+    def cleanup(self):
+        print("Cleaning up...")
+        self.detect_thread.stop()
+        self.camera.stop()
+        self.ur5.disconnect()
+        self.hand.disconnect()
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
+# ==========================================
+# 线程类定义
+# ==========================================
+class GUIUpdateThread(threading.Thread):
+    def __init__(self, gui, data_queue):
+        super().__init__()
+        self.gui = gui
+        self.data_queue = data_queue
+        self._stop_event = threading.Event()
+
+    def run(self):
+        while not self._stop_event.is_set():
+            try:
+                # 从队列获取最新数据
+                data = self.data_queue.get_nowait()
+                
+                # 在主线程执行GUI更新
+                self.gui.master.after(0, self._update_gui, data)
+                
+            except queue.Empty:
+                time.sleep(0.05)
+            except Exception as e:
+                print(f"GUI更新错误: {str(e)}")
+
+    def _update_gui(self, data):
+        """实际执行GUI更新的方法"""
+        if 'frame' in data:
+            self.gui.update_video(data['frame'])
+        if 'objects' in data:
+            self.gui.update_object_list(data['objects'])
+        if 'coordinates' in data:
+            self.gui.update_coordinates(*data['coordinates'])
+
+    def stop(self):
+        self._stop_event.set()
+
+
 class GraspingThread(threading.Thread):
     def __init__(self, controller):
         super().__init__()
@@ -217,59 +267,6 @@ class GraspingThread(threading.Thread):
         self._stop_event.set()
 
 
-# ==========================================
-# 主控制器
-# ==========================================
-class MainController:
-    def __init__(self):
-        # Initialize hardware
-        self.camera = Camera()
-        self.model = initialize_model(MODEL_PATH)
-        self.ur5 = UR5Controller(UR5_IP, UR5_PORT)
-        self.hand = InspireHand(HAND_IP, HAND_PORT, HAND_SPEED, HAND_FORCE)
-        
-        # Connect devices
-        try:
-            self.ur5.connect()
-            self.hand.connect()
-            print("Devices connected")
-        except Exception as e:
-            print(f"Connection failed: {str(e)}")
-            raise
-
-        # Initialize GUI
-        self.root = tk.Tk()
-        self.gui = RobotGUI(self.root, self)
-        
-        # Data communication
-        self.update_queue = queue.Queue(maxsize=3)
-        self.detect_thread = DetectionThread(self, self.update_queue)
-        
-        # Start GUI update loop
-        self.root.after(100, self.update_gui)
-
-    def start_detection(self):
-        print("Starting detection...")
-        self.detect_thread.start()
-
-    def update_gui(self):
-        try:
-            data = self.update_queue.get_nowait()
-            self.gui.update_interface(data['frame'], data['objects'])
-        except queue.Empty:
-            pass
-        self.root.after(100, self.update_gui)
-
-    def cleanup(self):
-        print("Cleaning up...")
-        self.detect_thread.stop()
-        self.camera.stop()
-        self.ur5.disconnect()
-        self.hand.disconnect()
-        self.root.destroy()
-
-    def run(self):
-        self.root.mainloop()
 
 if __name__ == "__main__":
     controller = MainController()
