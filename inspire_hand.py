@@ -25,6 +25,14 @@ from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
 from typing import List, Optional, Dict
 from config import HAND_IP, HAND_PORT, HAND_SPEED, HAND_FORCE
+import time
+
+# 预定义抓取和松开的位姿
+
+# 抓取位姿
+GRASP_POSITIONS = [400, 400, 400, 400, 400, 400]
+REALEASE_POSITIONS = [1000, 1000, 1000, 1000, 1000, 400]
+INITIAL_POSITIONS = [1000, 1000, 1000, 1000, 1000, 400]
 
 class HandConnectionError(Exception):
     """灵巧手连接相关异常基类"""
@@ -128,7 +136,7 @@ class InspireHand:
         """初始化灵巧手"""
         self.set_speed([self._default_speed] * self._num_DOF)
         self.set_force([self._default_force] * self._num_DOF)
-        self.set_positions([1000] * self._num_DOF)
+        self.set_positions(INITIAL_POSITIONS)
 
 
     def set_positions(self, positions: List[int]) -> None:
@@ -163,17 +171,18 @@ class InspireHand:
         """
         执行抓取动作（预设）
         """
-        # 闭合位置（根据实际设备调整）
-        self.set_positions([1000] * self._num_DOF)
         # 设置抓取速度和力度
         self.set_speed([self._default_speed] * self._num_DOF)
         self.set_force([self._default_force] * self._num_DOF)
+        # 闭合
+        self.set_positions(GRASP_POSITIONS)
 
     def release(self) -> None:
         """执行释放动作（全开）"""
-        self.set_positions([0] * self._num_DOF)
+
         self.set_speed([self._default_speed] * self._num_DOF)
         self.set_force([0] * self._num_DOF)
+        self.set_positions(REALEASE_POSITIONS)
 
     def get_status(self) -> dict:
         """
@@ -222,7 +231,7 @@ class InspireHand:
         if reg_name in ['angleSet', 'forceSet', 'speedSet', 'angleAct', 'forceAct']:
             val = self.read_register(self.regdict[reg_name], 6)
             if val:
-                print('读到的值依次为：', end='')
+                print(reg_name,'的值依次为：', end='')
                 for v in val:
                     print(v, end=' ')
                 print()
@@ -238,7 +247,7 @@ class InspireHand:
                     high_byte = (val_act[i] >> 8) & 0xFF
                     results.append(low_byte)
                     results.append(high_byte)
-                print('读到的值依次为：', end='')
+                print(reg_name,'的值依次为：', end='')
                 for v in results:
                     print(v, end=' ')
                 print()
@@ -275,8 +284,21 @@ def main():
     hand = InspireHand()
     try:
         hand.connect()
-        hand.grasp()
+        hand.initialize()
+
         hand.release()
+        time.sleep(3)
+        hand.grasp()
+        time.sleep(3)
+        hand.release()
+
+        # 读取寄存器并输出
+
+        # while True:
+        #     hand.read6('angleAct')
+        #     hand.read6('forceAct')
+        #     time.sleep(2)
+
     finally:
         hand.disconnect()
 
