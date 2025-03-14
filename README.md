@@ -577,3 +577,5 @@ pip install ultralytics
 ## 多线程
 
 使用了
+
++ 机械臂控制类不是线程安全的
