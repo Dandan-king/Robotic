@@ -5,10 +5,8 @@ MODEL_PATH = 'yolo11m-seg.pt'
 
 # UR5 机械臂 IP 和端口
 UR5_IP = '192.168.11.125'
-UR5_PORT = 30003
 UR5_SPEED = 0.25
 UR5_ACCEL = 1.2
-UR5_FAULT_POS = [-0.076, -0.223, 0.591, 0.047, 1.89, -2.06]
 UR5_FAULT_JOINT = [-1.5, -1.2, -2.0, 0.0, 1.5, 1.5]
 
 # 机械手 IP 和端口

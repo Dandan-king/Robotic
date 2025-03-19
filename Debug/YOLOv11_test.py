@@ -1,3 +1,5 @@
+"""测试YOLOv11模型的目标检测和实例分割功能"""
+
 import cv2
 import pyrealsense2 as rs
 import numpy as np
