@@ -290,13 +290,15 @@ class GraspingThread(threading.Thread):
 
                 current_pos = self.ur5_receive.getActualTCPPose()
                 # 再移动到目标位置后方一点点
-                pos_1 = [target_position[0] - 0.05, target_position[1] +0.1, target_position[2], current_pos[3], current_pos[4], current_pos[5]]
-                pos_2 = [target_position[0], target_position[1], target_position[2] - 0.03, current_pos[3], current_pos[4], current_pos[5]]
+                pos_1 = [target_position[0] - 0.06, target_position[1] +0.1, target_position[2] -0.08, current_pos[3], current_pos[4], current_pos[5]]
+                pos_2 = [pos_1[0]+0.05, pos_1[1], pos_1[2], pos_1[3], pos_1[4], pos_1[5]]
+                pos_3 = [pos_2[0], pos_2[1]-0.05, pos_2[2], pos_2[3], pos_2[4], pos_2[5]]
 
                 self.ur5_control.moveL(pos_1, 0.25, 1.2)
 
                 self.ur5_control.moveL(pos_2, 0.1, 1.2)
 
+                self.ur5_control.moveL(pos_3, 0.1, 1.2)
 
                 # 检测是否完成移动
                 while not self.ur5_control.isSteady():

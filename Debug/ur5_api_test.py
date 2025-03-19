@@ -14,7 +14,7 @@ rtde_c = rtde_control.RTDEControlInterface(UR5_IP)
 rtde_r = rtde_receive.RTDEReceiveInterface(UR5_IP)
 
 
-rtde_c.moveJ(UR5_FAULT_JOINT)
+rtde_c.moveJ([UR5_FAULT_JOINT[0], UR5_FAULT_JOINT[1], UR5_FAULT_JOINT[2], UR5_FAULT_JOINT[3], UR5_FAULT_JOINT[4], UR5_FAULT_JOINT[5]])
 
 target_pos = rtde_r.getTargetTCPPose()
 current_pos = rtde_r.getActualTCPPose()
@@ -40,8 +40,12 @@ print(f"机械臂当前关节角度：{actual_q}")
 actual_tcp = rtde_r.getActualTCPPose()
 print(f"机械臂当前位置：{actual_tcp}")
 
-speed = [0, 0, 0.100, 0, 0, 0]
-rtde_c.moveUntilContact(speed)
+# speed = [0, 0, 0.100, 0, 0, 0]
+# rtde_c.moveUntilContact(speed)
+
+# pose_1 = [-0.03, -0.63, 0.4, actual_tcp[3], actual_tcp[4], actual_tcp[5]]
+
+# rtde_c.moveL(pose_1,0.1,1.2)
 
 rtde_c.stopScript()
 
