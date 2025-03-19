@@ -236,6 +236,7 @@ class GraspingThread(threading.Thread):
         self.ur5_receive = None
         self.hand = None
         self.devices_connected = False
+        self.connect_devices()  # 在初始化时连接设备
 
     def connect_devices(self):
         max_retries = 5
@@ -273,15 +274,12 @@ class GraspingThread(threading.Thread):
         except queue.Full:
             pass
 
-
     def run(self):
         print("Grasping thread started")
         while not self._stop_event.is_set():
             try:
                 target_position = self.task_queue.get(timeout=0.1)
-                if not self.devices_connected:
-                    self.connect_devices()
-                
+
                 print(f"抓取坐标: {target_position}")
 
                 """ 所给的是物体三维坐标，需要转换为六维位姿，并规划路径 """
@@ -306,7 +304,6 @@ class GraspingThread(threading.Thread):
                     time.sleep(0.1)
                 print("机械臂移动完成，开始抓取")
 
-
                 self.hand.grasp()
                 time.sleep(2)
 
@@ -317,14 +314,13 @@ class GraspingThread(threading.Thread):
                 continue
             except Exception as e:
                 print(f"抓取失败: {str(e)}")
-            finally:
-                # !!! 在子线程内部断开连接 !!!
-                self._safe_disconnect()
+        # 线程结束时释放资源
+        self._safe_disconnect()
+
 
     def _safe_disconnect(self):
         """仅在子线程内释放资源"""
         try:
-
             if self.ur5_control and self.ur5_control.isConnected():
                 self.ur5_control.stopScript()
                 self.ur5_control.disconnect()
